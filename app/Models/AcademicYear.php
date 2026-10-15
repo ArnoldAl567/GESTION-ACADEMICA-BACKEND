@@ -10,7 +10,7 @@ class AcademicYear extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['year', 'starts_on', 'ends_on', 'status'];
+    protected $fillable = ['year', 'starts_on', 'ends_on', 'period_type', 'status'];
 
     protected $casts = ['starts_on' => 'date:Y-m-d', 'ends_on' => 'date:Y-m-d'];
 

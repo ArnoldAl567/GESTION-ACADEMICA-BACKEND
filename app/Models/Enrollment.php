@@ -32,4 +32,14 @@ class Enrollment extends Model
     {
         return $this->hasMany(Attendance::class);
     }
+
+    public function evaluationScores(): HasMany
+    {
+        return $this->hasMany(EvaluationScore::class);
+    }
+
+    public function observations(): HasMany
+    {
+        return $this->hasMany(StudentObservation::class);
+    }
 }

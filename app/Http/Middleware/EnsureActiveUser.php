@@ -11,7 +11,7 @@ class EnsureActiveUser
 {
     public function handle(Request $request, Closure $next): Response
     {
-        if (! $request->user()?->active || ! in_array($request->user()->role, ['admin', 'docente', 'padre'])) {
+        if (! $request->user()?->active || ! $request->user()->hasActiveRole() || ! in_array($request->user()->accessScope(), ['admin', 'docente', 'padre'])) {
             Auth::guard('web')->logout();
             $request->session()->invalidate();
             $request->session()->regenerateToken();

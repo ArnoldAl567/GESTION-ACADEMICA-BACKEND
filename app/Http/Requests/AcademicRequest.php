@@ -2,11 +2,32 @@
 
 namespace App\Http\Requests;
 
+use App\Models\Guardian;
+use App\Models\Role;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 class AcademicRequest extends FormRequest
 {
+    protected function prepareForValidation(): void
+    {
+        if ($this->route('resource') === 'students' && ! $this->route('id') && ! $this->exists('sex')) {
+            $this->merge(['sex' => 'F']);
+        }
+        if ($this->route('resource') !== 'students' || ! $this->filled('guardian_id')) {
+            return;
+        }
+
+        $guardian = Guardian::find($this->integer('guardian_id'));
+        if ($guardian) {
+            $this->merge([
+                'guardian' => $guardian->name,
+                'phone' => $guardian->phone,
+                'guardian_user_id' => $guardian->user_id,
+            ]);
+        }
+    }
+
     public function authorize(): bool
     {
         return $this->user()?->active === true;
@@ -18,17 +39,30 @@ class AcademicRequest extends FormRequest
         $resource = $this->route('resource');
         $unique = fn (string $table, string $column) => Rule::unique($table, $column)->ignore($id);
         $color = ['sometimes', 'regex:/^#[0-9a-fA-F]{6}$/'];
+        $guardianRoleCodes = Role::where('scope', 'padre')->where('active', true)->pluck('code');
+        $teacherRoleCodes = Role::where('scope', 'docente')->where('active', true)->pluck('code');
 
         return match ($resource) {
             'students' => [
                 'name' => ['required', 'string', 'max:150'],
+                'sex' => $id ? ['sometimes', 'in:F'] : ['required', 'in:F'],
                 'dni' => ['required', 'digits:8', $unique('students', 'dni')],
                 'birth_date' => ['nullable', 'date', 'before:today'],
                 'guardian' => ['required', 'string', 'max:150'],
                 'phone' => ['required', 'string', 'max:25'],
-                'guardian_user_id' => ['nullable', Rule::exists('users', 'id')->where('role', 'padre')],
+                'guardian_user_id' => ['nullable', Rule::exists('users', 'id')->where(fn ($query) => $query->whereIn('role', $guardianRoleCodes))],
+                'guardian_id' => ['nullable', 'exists:guardians,id'],
                 'status' => ['required', 'in:Activo,Inactivo,Trasladado'],
                 'color' => $color,
+            ],
+            'guardians' => [
+                'name' => ['required', 'string', 'max:150'],
+                'dni' => ['required', 'digits:8', $unique('guardians', 'dni')],
+                'phone' => ['required', 'string', 'max:25'],
+                'email' => ['required', 'email', 'max:255'],
+                'address' => ['nullable', 'string', 'max:250'],
+                'user_id' => ['required', Rule::exists('users', 'id')->where(fn ($query) => $query->whereIn('role', $guardianRoleCodes)), $unique('guardians', 'user_id')],
+                'status' => ['required', 'in:Activo,Inactivo'],
             ],
             'teachers' => [
                 'name' => ['required', 'string', 'max:150'],
@@ -37,16 +71,12 @@ class AcademicRequest extends FormRequest
                 'phone' => ['nullable', 'string', 'max:25'],
                 'status' => ['required', 'in:Activo,Inactivo'],
                 'color' => $color,
-                'user_id' => ['nullable', Rule::exists('users', 'id')->where('role', 'docente'), $unique('teachers', 'user_id')],
-                'course_ids' => ['required', 'array', 'min:1'],
-                'course_ids.*' => ['integer', 'distinct', 'exists:courses,id'],
+                'user_id' => ['nullable', Rule::exists('users', 'id')->where(fn ($query) => $query->whereIn('role', $teacherRoleCodes)), $unique('teachers', 'user_id')],
             ],
             'courses' => [
                 'name' => ['required', 'string', 'max:150', $unique('courses', 'name')],
                 'category' => ['required', 'string', 'max:80'],
                 'description' => ['nullable', 'string', 'max:2000'],
-                'teacher_ids' => ['required', 'array', 'min:1'],
-                'teacher_ids.*' => ['integer', 'distinct', 'exists:teachers,id'],
                 'hours' => ['required', 'integer', 'between:1,40'],
                 'color' => $color,
                 'soft' => $color,
@@ -63,6 +93,7 @@ class AcademicRequest extends FormRequest
                 'year' => ['required', 'integer', 'between:2020,2100', $unique('academic_years', 'year')],
                 'starts_on' => ['required', 'date'],
                 'ends_on' => ['required', 'date', 'after:starts_on'],
+                'period_type' => ['sometimes', 'in:Bimestral,Trimestral'],
                 'status' => ['required', 'in:Planificado,Activo,Cerrado'],
             ],
             'academic-periods' => [
@@ -83,7 +114,7 @@ class AcademicRequest extends FormRequest
             'schedules' => [
                 'classroom_id' => ['required', 'exists:classrooms,id'],
                 'course_id' => ['required', 'exists:courses,id'],
-                'teacher_id' => ['required', Rule::exists('teachers', 'id')->where('status', 'Activo')],
+                'teacher_id' => ['sometimes', 'nullable', Rule::exists('teachers', 'id')->where('status', 'Activo')],
                 'day' => ['required', 'integer', 'between:1,5'],
                 'starts_at' => ['required', 'date_format:H:i'],
                 'ends_at' => ['required', 'date_format:H:i', 'after:starts_at'],

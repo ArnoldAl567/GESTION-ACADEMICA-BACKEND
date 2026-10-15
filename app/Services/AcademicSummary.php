@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Attendance;
+use App\Models\AcademicPeriod;
 use App\Models\Grade;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -13,10 +14,16 @@ class AcademicSummary
 
     public function dashboard(User $user, int $year, int $period): array
     {
-        $enrollments = $this->access->enrollments($user)->where('year', $year)->with(['student', 'classroom', 'grades' => fn ($q) => $q->where('period', $period), 'attendances'])->get();
+        $mostrarNotas = $user->accessScope() !== 'padre' || AcademicPeriod::where('number', $period)
+            ->where('status', 'Cerrado')->whereHas('academicYear', fn (Builder $q) => $q->where('year', $year))->exists();
+        $enrollments = $this->access->enrollments($user)->where('year', $year)->with([
+            'student', 'classroom', 'attendances',
+            'grades' => fn ($q) => $q->where('period', $period)
+                ->when(! $mostrarNotas, fn ($grades) => $grades->whereRaw('1 = 0')),
+        ])->get();
         $active = $enrollments->where('status', 'Activo');
         $grades = $active->flatMap->grades;
-        if ($user->role === 'docente') {
+        if ($user->accessScope() === 'docente') {
             $courseIds = $this->access->courses($user)->pluck('id')->all();
             $grades = $grades->whereIn('course_id', $courseIds);
         }

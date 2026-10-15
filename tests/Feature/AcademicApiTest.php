@@ -2,13 +2,17 @@
 
 namespace Tests\Feature;
 
+use App\Models\AcademicPeriod;
+use App\Models\AcademicYear;
 use App\Models\Attendance;
 use App\Models\Classroom;
 use App\Models\Communication;
 use App\Models\Course;
 use App\Models\Enrollment;
+use App\Models\Role;
 use App\Models\Student;
 use App\Models\Teacher;
+use App\Models\TeacherAssignment;
 use App\Models\User;
 use Database\Seeders\AcademicSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -42,14 +46,24 @@ class AcademicApiTest extends TestCase
         return Student::factory()->make()->toArray();
     }
 
-    public function test_authentication_requires_valid_password_and_role(): void
+    public function test_authentication_uses_the_role_associated_with_the_credentials(): void
     {
         $this->getJson('/api/v1/students')->assertUnauthorized();
-        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'incorrect', 'role' => 'admin'])->assertUnprocessable();
-        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'Admin2026!', 'role' => 'padre'])->assertUnprocessable();
-        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'Admin2026!', 'role' => 'admin'])->assertOk()->assertJsonPath('user.role', 'admin')->assertJsonMissingPath('user.password');
+        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'incorrect'])->assertUnprocessable();
+        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'Admin2026!'])->assertOk()->assertJsonPath('user.role', 'admin')->assertJsonMissingPath('user.password');
+        $this->postJson('/api/v1/logout')->assertOk();
+        $this->postJson('/api/v1/login', ['email' => 'docente@colegio.edu.pe', 'password' => 'Docente2026!'])->assertOk()->assertJsonPath('user.role', 'docente');
         $this->postJson('/api/v1/logout')->assertOk();
         $this->getJson('/api/v1/me')->assertUnauthorized();
+    }
+
+    public function test_login_rejects_accounts_with_an_inactive_role(): void
+    {
+        Role::where('code', 'docente')->update(['active' => false]);
+
+        $this->postJson('/api/v1/login', ['email' => 'docente@colegio.edu.pe', 'password' => 'Docente2026!'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('email');
     }
 
     public function test_default_admin_access_works_only_when_enabled(): void
@@ -70,7 +84,7 @@ class AcademicApiTest extends TestCase
     {
         $this->assertSame('pgsql', DB::getDriverName());
         $this->actingAs($this->admin());
-        foreach (['bootstrap', 'dashboard?year=2026', 'students', 'teachers', 'courses', 'classrooms', 'enrollments', 'schedules', 'communications', 'academic-years', 'academic-periods', 'users'] as $path) {
+        foreach (['bootstrap', 'dashboard?year=2026', 'students', 'guardians', 'roles', 'teachers', 'courses', 'classrooms', 'enrollments', 'schedules', 'communications', 'academic-years', 'academic-periods', 'users'] as $path) {
             $this->getJson('/api/v1/'.$path)->assertOk();
         }
         $this->getJson('/api/v1/bootstrap')->assertJsonCount(4, 'periods');
@@ -83,15 +97,74 @@ class AcademicApiTest extends TestCase
     {
         $this->actingAs($this->admin());
         $data = $this->studentData();
+        $this->postJson('/api/v1/students', [...$data, 'sex' => 'M'])->assertUnprocessable()->assertJsonValidationErrors('sex');
         $id = $this->postJson('/api/v1/students', $data)->assertCreated()->json('data.id');
-        $this->assertDatabaseHas('students', ['id' => $id, 'dni' => $data['dni']]);
+        $this->assertDatabaseHas('students', ['id' => $id, 'dni' => $data['dni'], 'sex' => 'F']);
         $this->postJson('/api/v1/students', $data)->assertUnprocessable()->assertJsonValidationErrors('dni');
-        $data['name'] = 'Estudiante actualizado';
+        $data['name'] = 'Alumna actualizada';
         $this->putJson('/api/v1/students/'.$id, $data)->assertOk();
-        $this->getJson('/api/v1/students?q=actualizado')->assertOk()->assertJsonPath('total', 1);
+        $this->getJson('/api/v1/students?q=actualizada')->assertOk()->assertJsonPath('total', 1);
         $this->getJson('/api/v1/students?q='.$data['dni'])->assertOk()->assertJsonPath('data.0.id', $id);
         $this->deleteJson('/api/v1/students/'.$id)->assertOk();
         $this->assertDatabaseMissing('students', ['id' => $id]);
+
+        $anterior = Student::factory()->create(['sex' => null]);
+        $datosAnteriores = $anterior->only(['name', 'dni', 'guardian', 'phone', 'status']);
+        $this->putJson('/api/v1/students/'.$anterior->id, $datosAnteriores)->assertOk();
+        $this->assertDatabaseHas('students', ['id' => $anterior->id, 'sex' => null]);
+    }
+
+    public function test_guardian_crud_links_students_and_keeps_legacy_contact_in_sync(): void
+    {
+        $this->actingAs($this->admin());
+        $account = User::factory()->create(['name' => 'Rosa Elena Mendoza', 'email' => 'rosa.mendoza@example.com', 'role' => 'padre', 'active' => true]);
+        $guardian = [
+            'name' => 'Rosa Elena Mendoza',
+            'dni' => '44556677',
+            'phone' => '987654300',
+            'email' => 'rosa.mendoza@example.com',
+            'address' => 'Av. Los Laureles 125',
+            'user_id' => $account->id,
+            'status' => 'Activo',
+        ];
+        $this->postJson('/api/v1/guardians', array_merge($guardian, ['dni' => null, 'user_id' => null]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['dni', 'user_id']);
+        $guardianId = $this->postJson('/api/v1/guardians', $guardian)->assertCreated()->json('data.id');
+        $this->getJson('/api/v1/guardians?q=44556677')->assertOk()->assertJsonPath('data.0.id', $guardianId);
+
+        $student = array_merge($this->studentData(), ['guardian_id' => $guardianId]);
+        $studentId = $this->postJson('/api/v1/students', $student)->assertCreated()->json('data.id');
+        $this->assertDatabaseHas('students', ['id' => $studentId, 'guardian_id' => $guardianId, 'guardian' => $guardian['name'], 'phone' => $guardian['phone']]);
+        $this->getJson('/api/v1/guardians/'.$guardianId)->assertOk()->assertJsonPath('data.students_count', 1);
+
+        $guardian['name'] = 'Rosa Mendoza Actualizada';
+        $guardian['phone'] = '900111222';
+        $this->putJson('/api/v1/guardians/'.$guardianId, $guardian)->assertOk();
+        $this->assertDatabaseHas('students', ['id' => $studentId, 'guardian' => $guardian['name'], 'phone' => $guardian['phone']]);
+        $this->deleteJson('/api/v1/guardians/'.$guardianId)->assertConflict();
+
+        $this->deleteJson('/api/v1/students/'.$studentId)->assertOk();
+        $this->deleteJson('/api/v1/guardians/'.$guardianId)->assertOk();
+        $this->assertDatabaseMissing('guardians', ['id' => $guardianId]);
+    }
+
+    public function test_students_can_be_filtered_by_grade_and_section(): void
+    {
+        $this->actingAs($this->admin());
+        $room = Classroom::whereHas('enrollments')->orderBy('grade')->orderBy('section')->firstOrFail();
+        $expectedSection = Enrollment::where('year', $room->year)->where('classroom_id', $room->id)->distinct()->count('student_id');
+        $expectedGrade = Student::whereHas('enrollments', fn ($query) => $query
+            ->where('year', $room->year)
+            ->whereHas('classroom', fn ($classrooms) => $classrooms->where('grade', $room->grade)))
+            ->count();
+
+        $this->getJson('/api/v1/students?year='.$room->year.'&grade='.$room->grade)
+            ->assertOk()
+            ->assertJsonPath('total', $expectedGrade);
+        $this->getJson('/api/v1/students?year='.$room->year.'&grade='.$room->grade.'&classroom_id='.$room->id)
+            ->assertOk()
+            ->assertJsonPath('total', $expectedSection);
     }
 
     public function test_student_with_history_cannot_be_deleted(): void
@@ -103,7 +176,7 @@ class AcademicApiTest extends TestCase
     {
         $parent = User::where('role', 'padre')->firstOrFail();
         $this->actingAs($parent)->getJson('/api/v1/students')->assertOk()->assertJsonPath('total', 1);
-        $other = Student::whereNull('guardian_user_id')->firstOrFail();
+        $other = Student::where('guardian_user_id', '!=', $parent->id)->firstOrFail();
         $this->getJson('/api/v1/students?q='.$other->dni)->assertOk()->assertJsonPath('total', 0);
         $this->getJson('/api/v1/students/'.$other->id)->assertNotFound();
         $this->postJson('/api/v1/students', $this->studentData())->assertForbidden();
@@ -126,6 +199,57 @@ class AcademicApiTest extends TestCase
         $this->postJson('/api/v1/enrollments', $data)->assertUnprocessable();
     }
 
+    public function test_enrollments_can_be_filtered_by_grade_and_section(): void
+    {
+        $this->actingAs($this->admin());
+        $room = Classroom::whereHas('enrollments')->orderBy('grade')->orderBy('section')->firstOrFail();
+        $expectedGrade = Enrollment::where('year', $room->year)
+            ->whereHas('classroom', fn ($classrooms) => $classrooms->where('grade', $room->grade))
+            ->count();
+        $expectedSection = Enrollment::where('year', $room->year)
+            ->where('classroom_id', $room->id)
+            ->count();
+
+        $this->getJson('/api/v1/enrollments?year='.$room->year.'&grade='.$room->grade)
+            ->assertOk()
+            ->assertJsonPath('total', $expectedGrade);
+        $this->getJson('/api/v1/enrollments?year='.$room->year.'&grade='.$room->grade.'&classroom_id='.$room->id)
+            ->assertOk()
+            ->assertJsonPath('total', $expectedSection);
+    }
+
+    public function test_enrollment_status_can_be_toggled(): void
+    {
+        $this->actingAs($this->admin());
+        $enrollment = Enrollment::where('status', 'Activo')->firstOrFail();
+
+        $this->putJson('/api/v1/enrollments/'.$enrollment->id.'/activation', ['active' => false])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'Pendiente');
+        $this->assertDatabaseHas('enrollments', ['id' => $enrollment->id, 'status' => 'Pendiente']);
+
+        $this->putJson('/api/v1/enrollments/'.$enrollment->id.'/activation', ['active' => true])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'Activo');
+        $this->assertDatabaseHas('enrollments', ['id' => $enrollment->id, 'status' => 'Activo']);
+    }
+
+    public function test_enrollment_candidates_only_include_active_students_without_enrollment_for_the_year(): void
+    {
+        $this->actingAs($this->admin());
+        $year = Enrollment::firstOrFail()->year;
+        $candidate = Student::factory()->create(['status' => 'Activo']);
+        $inactive = Student::factory()->create(['status' => 'Inactivo']);
+        $alreadyEnrolled = Enrollment::where('year', $year)->firstOrFail()->student_id;
+
+        $response = $this->getJson('/api/v1/enrollment-candidates?year='.$year)->assertOk();
+        $ids = collect($response->json('data'))->pluck('id');
+
+        $this->assertTrue($ids->contains($candidate->id));
+        $this->assertFalse($ids->contains($inactive->id));
+        $this->assertFalse($ids->contains($alreadyEnrolled));
+    }
+
     public function test_attendance_is_persistent_idempotent_and_atomic(): void
     {
         $this->actingAs($this->admin());
@@ -146,9 +270,15 @@ class AcademicApiTest extends TestCase
     public function test_grades_enforce_range_and_teacher_ownership(): void
     {
         $teacher = User::where('role', 'docente')->firstOrFail();
-        $own = Course::whereHas('teachers', fn ($q) => $q->where('user_id', $teacher->id))->firstOrFail();
-        $other = Course::where('id', '!=', $own->id)->firstOrFail();
-        $e = Enrollment::where('status', 'Activo')->firstOrFail();
+        $assignment = TeacherAssignment::where('status', 'Activo')
+            ->whereHas('teacher', fn ($q) => $q->where('user_id', $teacher->id))
+            ->whereHas('academicPeriod', fn ($q) => $q->where('number', 3))
+            ->firstOrFail();
+        $own = Course::findOrFail($assignment->course_id);
+        $other = Course::where('id', '!=', $own->id)
+            ->whereHas('classrooms', fn ($q) => $q->whereKey($assignment->classroom_id))
+            ->firstOrFail();
+        $e = Enrollment::where('status', 'Activo')->where('classroom_id', $assignment->classroom_id)->firstOrFail();
         $data = ['classroom_id' => $e->classroom_id, 'course_id' => $own->id, 'period' => 3, 'records' => [['enrollment_id' => $e->id, 'score' => 18.5]]];
         $this->actingAs($teacher)->putJson('/api/v1/grades', $data)->assertOk();
         $this->assertDatabaseHas('grades', ['enrollment_id' => $e->id, 'course_id' => $own->id, 'score' => 18.5]);
@@ -159,6 +289,8 @@ class AcademicApiTest extends TestCase
         $this->putJson('/api/v1/grades', $data)->assertUnprocessable();
         $data['records'][0]['score'] = 19;
         $data['course_id'] = $other->id;
+        $this->putJson('/api/v1/grades', $data)->assertOk();
+        $data['classroom_id'] = Classroom::where('year', 2026)->where('id', '!=', $e->classroom_id)->firstOrFail()->id;
         $this->putJson('/api/v1/grades', $data)->assertForbidden();
     }
 
@@ -167,14 +299,16 @@ class AcademicApiTest extends TestCase
         $this->actingAs($this->admin());
         $course = Course::firstOrFail();
         $rooms = $course->classrooms()->orderBy('id')->take(2)->get();
-        $data = ['classroom_id' => $rooms[0]->id, 'course_id' => $course->id, 'teacher_id' => $course->teachers()->value('teachers.id'), 'day' => 1, 'starts_at' => '14:00', 'ends_at' => '14:45'];
+        $data = ['classroom_id' => $rooms[0]->id, 'course_id' => $course->id, 'teacher_id' => $rooms[0]->activeAssignment->teacher_id, 'day' => 1, 'starts_at' => '14:00', 'ends_at' => '14:45'];
         $this->postJson('/api/v1/schedules', $data)->assertCreated();
-        $data['classroom_id'] = $rooms[1]->id;
         $data['starts_at'] = '14:30';
         $this->postJson('/api/v1/schedules', $data)->assertUnprocessable()->assertJsonValidationErrors('starts_at');
-        $data['starts_at'] = '14:45';
+        $data['classroom_id'] = $rooms[1]->id;
+        $data['teacher_id'] = $rooms[1]->activeAssignment->teacher_id;
         $data['ends_at'] = '15:30';
         $this->postJson('/api/v1/schedules', $data)->assertCreated();
+        $data['teacher_id'] = $rooms[0]->activeAssignment->teacher_id;
+        $this->postJson('/api/v1/schedules', $data)->assertUnprocessable()->assertJsonValidationErrors('teacher_id');
     }
 
     public function test_communications_respect_audience_drafts_and_per_user_receipts(): void
@@ -214,7 +348,56 @@ class AcademicApiTest extends TestCase
         $this->putJson('/api/v1/settings', ['name' => 'Colegio de prueba', 'year' => 2027, 'period' => 1])->assertOk();
         $this->getJson('/api/v1/bootstrap')->assertOk()->assertJsonPath('settings.year', 2027);
         $this->postJson('/api/v1/logout');
-        $this->postJson('/api/v1/login', ['email' => 'nuevo@example.test', 'role' => 'docente', 'password' => 'Secure2026!'])->assertUnprocessable();
+        $this->postJson('/api/v1/login', ['email' => 'nuevo@example.test', 'password' => 'Secure2026!'])->assertUnprocessable();
+    }
+
+    public function test_roles_can_be_managed_and_protect_base_or_assigned_roles(): void
+    {
+        $this->actingAs($this->admin());
+
+        $this->getJson('/api/v1/roles')
+            ->assertOk()
+            ->assertJsonPath('total', 3)
+            ->assertJsonPath('data.0.system', true);
+
+        $data = [
+            'code' => 'coordinador',
+            'name' => 'Coordinador académico',
+            'description' => 'Supervisa el trabajo académico.',
+            'scope' => 'docente',
+            'icon' => 'supervisor_account',
+            'active' => true,
+        ];
+        $roleId = $this->postJson('/api/v1/roles', $data)
+            ->assertCreated()
+            ->assertJsonPath('data.system', false)
+            ->json('data.id');
+
+        $data['name'] = 'Coordinación académica';
+        $this->putJson('/api/v1/roles/'.$roleId, $data)
+            ->assertOk()
+            ->assertJsonPath('data.name', $data['name']);
+        $this->putJson('/api/v1/roles/'.$roleId.'/activation', ['active' => false])
+            ->assertOk()
+            ->assertJsonPath('data.active', false);
+        $this->putJson('/api/v1/roles/'.$roleId.'/activation', ['active' => true])->assertOk();
+
+        User::factory()->create(['role' => 'coordinador']);
+        $this->deleteJson('/api/v1/roles/'.$roleId)->assertUnprocessable();
+        $this->deleteJson('/api/v1/roles/'.Role::where('code', 'docente')->value('id'))->assertUnprocessable();
+        $this->putJson('/api/v1/roles/'.Role::where('code', 'admin')->value('id').'/activation', ['active' => false])
+            ->assertUnprocessable();
+
+        $freeRoleId = Role::create([
+            'code' => 'auxiliar',
+            'name' => 'Auxiliar',
+            'description' => 'Apoya el registro académico.',
+            'scope' => 'docente',
+            'icon' => 'support_agent',
+            'active' => true,
+        ])->id;
+        $this->deleteJson('/api/v1/roles/'.$freeRoleId)->assertOk();
+        $this->assertDatabaseMissing('roles', ['id' => $freeRoleId]);
     }
 
     public function test_disabled_account_loses_access_to_existing_session(): void
@@ -239,23 +422,20 @@ class AcademicApiTest extends TestCase
     public function test_teacher_and_course_crud_persist_and_keep_references_valid(): void
     {
         $this->actingAs($this->admin());
-        $existingCourse = Course::firstOrFail();
-        $teacherData = ['name' => 'Docente de prueba', 'dni' => '45678901', 'email' => 'prueba@example.test', 'status' => 'Activo', 'course_ids' => [$existingCourse->id]];
+        $teacherData = ['name' => 'Docente de prueba', 'dni' => '45678901', 'email' => 'prueba@example.test', 'status' => 'Activo'];
         $teacherId = $this->postJson('/api/v1/teachers', $teacherData)->assertCreated()->json('data.id');
         $this->postJson('/api/v1/teachers', $teacherData)->assertUnprocessable();
         $teacherData['name'] = 'Docente actualizado';
         $this->putJson('/api/v1/teachers/'.$teacherId, $teacherData)->assertOk();
         $room = Classroom::firstOrFail();
-        $otherTeacherId = Teacher::where('id', '!=', $teacherId)->firstOrFail()->id;
-        $courseData = ['name' => 'Robótica', 'category' => 'Ciencias', 'teacher_ids' => [$teacherId, $otherTeacherId], 'hours' => 3, 'classroom_ids' => [$room->id]];
+        $courseData = ['name' => 'Robótica', 'category' => 'Ciencias', 'hours' => 3, 'classroom_ids' => [$room->id]];
         $courseId = $this->postJson('/api/v1/courses', $courseData)->assertCreated()->json('data.id');
-        $teacherData['course_ids'] = [$existingCourse->id, $courseId];
-        $this->putJson('/api/v1/teachers/'.$teacherId, $teacherData)->assertOk()->assertJsonCount(2, 'data.courses');
-        $this->assertDatabaseHas('course_teacher', ['course_id' => $courseId, 'teacher_id' => $teacherId]);
-        $this->assertDatabaseHas('course_teacher', ['course_id' => $courseId, 'teacher_id' => $otherTeacherId]);
+        $this->assertSame(4, TeacherAssignment::where('course_id', $courseId)->where('classroom_id', $room->id)->count());
+        $this->assertDatabaseHas('teacher_assignments', ['course_id' => $courseId, 'classroom_id' => $room->id, 'teacher_id' => $room->activeAssignment->teacher_id]);
         $this->assertDatabaseHas('classroom_course', ['classroom_id' => $room->id, 'course_id' => $courseId]);
         $courseData['hours'] = 5;
         $this->putJson('/api/v1/courses/'.$courseId, $courseData)->assertOk()->assertJsonPath('data.hours', 5);
+        $this->assertDatabaseHas('teacher_assignments', ['course_id' => $courseId, 'classroom_id' => $room->id, 'weekly_hours' => 5]);
         $this->deleteJson('/api/v1/courses/'.$courseId)->assertOk();
         $this->deleteJson('/api/v1/teachers/'.$teacherId)->assertOk();
     }
@@ -276,7 +456,7 @@ class AcademicApiTest extends TestCase
         $this->putJson('/api/v1/password', ['current_password' => 'incorrect', 'password' => 'NuevaClave2026!', 'password_confirmation' => 'NuevaClave2026!'])->assertUnprocessable();
         $this->putJson('/api/v1/password', ['current_password' => 'Admin2026!', 'password' => 'NuevaClave2026!', 'password_confirmation' => 'NuevaClave2026!'])->assertOk();
         $this->postJson('/api/v1/logout')->assertOk();
-        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'NuevaClave2026!', 'role' => 'admin'])->assertOk();
+        $this->postJson('/api/v1/login', ['email' => 'admin@colegio.edu.pe', 'password' => 'NuevaClave2026!'])->assertOk();
     }
 
     public function test_academic_year_and_period_crud(): void
@@ -297,5 +477,48 @@ class AcademicApiTest extends TestCase
 
         $activeYearId = DB::table('academic_years')->where('status', 'Activo')->value('id');
         $this->deleteJson('/api/v1/academic-years/'.$activeYearId)->assertUnprocessable();
+    }
+
+    public function test_only_one_academic_year_and_period_can_be_active(): void
+    {
+        $this->actingAs($this->admin());
+        $previousYear = AcademicYear::where('status', 'Activo')->firstOrFail();
+        $previousPeriod = AcademicPeriod::where('status', 'Activo')->firstOrFail();
+        $newYear = AcademicYear::create([
+            'year' => 2031,
+            'starts_on' => '2031-03-01',
+            'ends_on' => '2031-12-20',
+            'status' => 'Planificado',
+        ]);
+        $newPeriod = AcademicPeriod::create([
+            'academic_year_id' => $newYear->id,
+            'number' => 1,
+            'name' => 'Bimestre 1',
+            'starts_on' => '2031-03-01',
+            'ends_on' => '2031-05-10',
+            'status' => 'Planificado',
+        ]);
+
+        $this->putJson('/api/v1/academic-years/'.$newYear->id.'/activation', ['active' => true])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'Activo');
+        $this->assertDatabaseCount('academic_years', AcademicYear::count());
+        $this->assertSame(1, AcademicYear::where('status', 'Activo')->count());
+        $this->assertDatabaseMissing('academic_years', ['id' => $previousYear->id, 'status' => 'Activo']);
+        $this->assertDatabaseMissing('academic_periods', ['id' => $previousPeriod->id, 'status' => 'Activo']);
+
+        $this->putJson('/api/v1/academic-periods/'.$newPeriod->id.'/activation', ['active' => true])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'Activo');
+        $this->assertSame(1, AcademicYear::where('status', 'Activo')->count());
+        $this->assertSame(1, AcademicPeriod::where('status', 'Activo')->count());
+        $this->assertDatabaseHas('academic_years', ['id' => $newYear->id, 'status' => 'Activo']);
+        $this->assertDatabaseHas('school_settings', ['id' => 1, 'year' => 2031, 'period' => 1]);
+
+        $this->putJson('/api/v1/academic-years/'.$newYear->id.'/activation', ['active' => false])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'Planificado');
+        $this->assertSame(0, AcademicYear::where('status', 'Activo')->count());
+        $this->assertSame(0, AcademicPeriod::where('status', 'Activo')->count());
     }
 }

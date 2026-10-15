@@ -21,15 +21,18 @@ class AuthController extends Controller
         $data = $request->validate([
             'email' => ['required', 'email', 'max:255'],
             'password' => ['required', 'string', 'max:255'],
-            'role' => ['required', 'in:admin,docente,padre'],
             'remember' => ['sometimes', 'boolean'],
         ]);
-        if (! Auth::attempt(['email' => $data['email'], 'password' => $data['password'], 'role' => $data['role'], 'active' => true], $data['remember'] ?? false)) {
-            throw ValidationException::withMessages(['email' => 'El correo, la contraseña o el perfil no son correctos.']);
+        if (! Auth::attempt(['email' => $data['email'], 'password' => $data['password'], 'active' => true], $data['remember'] ?? false)) {
+            throw ValidationException::withMessages(['email' => 'El correo o la contraseña no son correctos.']);
+        }
+        if (! $request->user()?->hasActiveRole()) {
+            Auth::guard('web')->logout();
+            throw ValidationException::withMessages(['email' => 'La cuenta no tiene un perfil activo. Comunícate con la administración.']);
         }
         $request->session()->regenerate();
 
-        return response()->json(['user' => $request->user(), 'csrf_token' => csrf_token()]);
+        return response()->json(['user' => $request->user()->load('roleRecord'), 'csrf_token' => csrf_token()]);
     }
 
     public function defaultAdmin(Request $request): JsonResponse
@@ -38,21 +41,21 @@ class AuthController extends Controller
 
         $admin = User::query()
             ->where('email', config('auth.default_admin_email'))
-            ->where('role', 'admin')
+            ->whereHas('roleRecord', fn ($role) => $role->where('scope', 'admin')->where('active', true))
             ->where('active', true)
             ->firstOrFail();
 
         Auth::guard('web')->login($admin, true);
         $request->session()->regenerate();
 
-        return response()->json(['user' => $admin, 'csrf_token' => csrf_token()]);
+        return response()->json(['user' => $admin->load('roleRecord'), 'csrf_token' => csrf_token()]);
     }
 
     public function me(Request $request): JsonResponse
     {
-        abort_unless($request->user()?->active, 401);
+        abort_unless($request->user()?->active && $request->user()->hasActiveRole(), 401);
 
-        return response()->json(['user' => $request->user(), 'csrf_token' => csrf_token()]);
+        return response()->json(['user' => $request->user()->load('roleRecord'), 'csrf_token' => csrf_token()]);
     }
 
     public function logout(Request $request): JsonResponse

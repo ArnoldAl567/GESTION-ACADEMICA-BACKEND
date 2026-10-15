@@ -1,4 +1,6 @@
-# EduGest Pro — Laravel y PostgreSQL
+# Institución Educativa N° 80404 — Laravel y PostgreSQL
+
+Consulta [ESTRUCTURA.md](ESTRUCTURA.md) para ubicar rápidamente controladores, servicios, reglas y módulos.
 
 API de gestión académica para `GESTION_ACADEMICA_FRONTEND` (Angular). Laravel 13, PHP 8.3 o superior y PostgreSQL 17.
 
@@ -10,7 +12,7 @@ Terminal del backend:
 
 ```powershell
 cd GESTION_ACADEMICA_BACKEND
-php artisan serve --host=127.0.0.1 --port=8000
+php artisan serve --host=127.0.0.1 --port=8001
 ```
 
 Otra terminal, para Angular:
@@ -20,7 +22,7 @@ cd GESTION_ACADEMICA_FRONTEND
 npm start
 ```
 
-Abre http://localhost:4200. El proxy de Angular envía `/api/**` a Laravel. Si Angular estaba abierto antes del cambio, reinícialo para cargar `proxy.conf.json`.
+Abre http://127.0.0.1:4200. El proxy de Angular envía `/api/**` a Laravel. Si Angular estaba abierto antes del cambio, reinícialo para cargar `proxy.conf.json`.
 
 ## Acceso temporal sin login
 
@@ -45,23 +47,23 @@ No publiques `.env`. La contraseña de PostgreSQL solo está configurada allí. 
 | --- | --- | --- |
 | Administrador | admin@colegio.edu.pe | Admin2026! |
 | Docente | docente@colegio.edu.pe | Docente2026! |
-| Padre / Apoderado | padre@colegio.edu.pe | Padre2026! |
+| Padre / Apoderado | carmen.espinoza@familias.colegio.edu.pe | Padre2026! |
 
 Selecciona el perfil correspondiente en el acceso. Las contraseñas se guardan con hash. El seeder solo permite entornos `local` y `testing`, y usa `firstOrCreate` para no sustituir registros existentes. No ejecutes el seeder de demostración en producción.
 
-La base contiene 20 estudiantes ficticios, 10 docentes, 8 cursos, 18 aulas, matrículas, notas, asistencia y comunicados. Los indicadores reflejan esos registros reales; no reproducen los totales ficticios del diseño.
+En una instalación de demostración nueva, el seeder crea 20 alumnas ficticias, 18 docentes titulares, 8 cursos y 18 aulas. Cada aula recibe una docente para todos sus cursos y periodos. El seeder no sustituye nombres ni asignaciones de una base ya existente.
 
 ## Funcionalidades
 
 - Autenticación por correo, contraseña y perfil; sesión persistente, cierre de sesión y cambio de contraseña.
-- Estudiantes: registro, edición, búsqueda, paginación, estado, apoderado y vinculación con una cuenta de familia.
-- Docentes: registro, edición, estado, especialidad y cuenta vinculada.
-- Cursos: docente responsable, horas, área y aulas asignadas.
+- Alumnas: registro, edición, búsqueda, paginación, estado, apoderado y vinculación con una cuenta de familia. Los registros nuevos se guardan con sexo femenino.
+- Docentes: registro, edición, estado y cuenta vinculada. La asignación se hace por aula y año, no por curso individual.
+- Cursos: horas, área y aulas donde se dictan; la docente titular del aula enseña todos sus cursos.
 - Aulas: año, grado, sección y capacidad. Administración desde Configuración.
 - Matrículas: estudiante, aula, año, fecha y estado; unicidad estudiante/año y control de vacantes.
 - Asistencia diaria por aula con estados P/F/T/J. Guardado por lote en una transacción, sin duplicar registros al volver a guardar.
 - Calificaciones por aula, curso y bimestre, escala 0–20; guardado por lote y consulta de promedios.
-- Horarios: bloques semanales por curso y aula; evita superposiciones de aula o docente en el mismo año.
+- Horarios: bloques semanales por curso y aula; la docente titular se asigna automáticamente y se evitan superposiciones.
 - Comunicados: redacción, borradores, publicación, destinatarios por perfil/aula, lectura y archivo individual.
 - Dashboard: totales, distribución, asistencia, promedios, matrículas y alertas calculados desde PostgreSQL.
 - Reportes de notas, asistencia, padrón, matrículas y carga docente; CSV compatible con Excel e impresión/guardar PDF desde el navegador.
@@ -73,11 +75,19 @@ Los comunicados se entregan dentro del sistema; no envían correo externo. El PD
 
 Los permisos se verifican en Laravel, además de ocultar acciones en Angular:
 - Administradores: mantenimiento de registros y configuración.
-- Docentes: estudiantes y matrículas de aulas asignadas; notas únicamente de sus cursos; asistencia de sus aulas y comunicados para sus familias.
+- Docentes: alumnas y matrículas de su aula activa; notas de todos los cursos de esa aula y periodo, asistencia y comunicados para sus familias.
 - Apoderados: consulta únicamente de sus hijos, notas, asistencia, horarios y comunicados pertinentes. Sin escritura académica.
 - Una cuenta desactivada pierde acceso incluso si ya tenía sesión iniciada.
 
 Las claves foráneas impiden borrar registros con historial. El sistema devuelve conflicto 409 y permite cambiar su estado. Los errores de validación devuelven 422, acceso no autorizado 401/403 y registros inaccesibles 404.
+
+## Regla institucional: primaria femenina y docente titular
+
+- Al crear una alumna, la API registra `sex = F` y rechaza otros valores. La migración deja `sex` sin verificar en registros anteriores; no deduce el dato por el nombre ni cambia nombres existentes.
+- `POST /api/v1/management/teacher-assignments` recibe `teacher_id`, `classroom_id` y `status`. Una sola operación genera los detalles por todos los cursos y periodos del año del aula. `GET` muestra una fila por docente y aula; `PUT` y `DELETE` operan sobre la asignación completa.
+- Una docente no puede tener dos aulas activas en un mismo año, ni un aula dos docentes titulares activas. Para sustituir a la titular, desactiva primero su asignación y luego asigna la nueva docente; los bloques de horario existentes se actualizan al activar la nueva asignación.
+- Al añadir un curso a un aula o crear un periodo académico, el sistema completa automáticamente los detalles de la titular activa.
+- En una base previa, asigna manualmente cada aula desde **Docente titular por aula**. Los vínculos generales antiguos entre cursos y docentes no se convierten automáticamente, porque no indican qué docente corresponde a cada aula.
 
 ## API
 
@@ -148,7 +158,7 @@ npm run build
 npm run serve:ssr:GESTION_ACADEMICA_FRONTEND
 ```
 
-La versión SSR se abre en http://localhost:4000 y también reenvía `/api` a Laravel. Puede configurarse `BACKEND_URL` en el proceso Node (por defecto http://127.0.0.1:8000).
+La versión SSR se abre en http://localhost:4000 y también reenvía `/api` a Laravel. Puede configurarse `BACKEND_URL` en el proceso Node (por defecto http://127.0.0.1:8001).
 
 La lista `security.allowedHosts` de `angular.json` permite los nombres locales. Antes de publicar SSR, añade el dominio real de la institución y vuelve a compilar; no uses un comodín global.
 
